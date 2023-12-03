@@ -1,0 +1,139 @@
+---
+fontsize: 10pt
+header-includes:
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \fancyhead[LE,LO]{\leftmark}
+  - \fancyhead[RE,RO]{\rightmark}
+  - \fancyfoot[CE,CO]{\thepage}
+  - \fancyfoot[LE,RO]{}
+  - \renewcommand{\headrulewidth}{1 pt}
+  - \renewcommand{\footrulewidth}{1 pt}
+  - \usepackage{setspace}
+  - \setstretch{1.25}
+  - \setcounter{page}{1}
+  - \usepackage{amsmath}
+  - \usepackage{bm}
+  - \usepackage{amsfonts}
+  - \usepackage{amssymb}
+  - \usepackage{amsthm}
+  - \usepackage{mathtools}
+  - \usepackage{empheq}
+  - \usepackage{enumerate}
+geometry: "inner = 1 cm, outer = 1 cm, top = 1 cm, bottom = 1 cm, includehead, includefoot"
+
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library("latex2exp")
+library("ggplot2")
+library("MASS")
+library("MCMCpack")
+library(coda)
+library(ordinal)
+```
+
+\markboth{EN.553.671 Homework 6}{Jeewon Han}
+\subsection*{3. }
+
+```{r, warning=FALSE, message=FALSE}
+# Exploratory Data Analysis
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+
+# Read your CSV data
+data <- read.csv("your_data.csv")
+
+# Summary statistics
+summary_stats <- summary(data)
+
+# Pairwise scatterplots
+pairwise_scatterplots <- pairs(data[, c("fixed_acidity", "volatile_acidity", "citric_acid", 
+                                       "residual_sugar", "chlorides", "free_sulfur_dioxide", 
+                                       "total_sulfur_dioxide", "density", "pH", "sulphates", 
+                                       "alcohol")])
+
+# Histograms for continuous variables
+histograms <- lapply(data[, c("fixed_acidity", "volatile_acidity", "citric_acid", 
+                               "residual_sugar", "chlorides", "free_sulfur_dioxide", 
+                               "total_sulfur_dioxide", "density", "pH", "sulphates", 
+                               "alcohol")], function(var) {
+  ggplot(data, aes(x = var)) +
+    geom_histogram(binwidth = 1, fill = "blue", color = "black", alpha = 0.7) +
+    labs(title = paste("Histogram of", var), x = var, y = "Frequency") +
+    theme_minimal()
+})
+
+# Boxplots for continuous variables by color
+boxplots <- lapply(data[, c("fixed_acidity", "volatile_acidity", "citric_acid", 
+                            "residual_sugar", "chlorides", "free_sulfur_dioxide", 
+                            "total_sulfur_dioxide", "density", "pH", "sulphates", 
+                            "alcohol")], function(var) {
+  ggplot(data, aes(x = color, y = var, fill = color)) +
+    geom_boxplot() +
+    labs(title = paste("Boxplot of", var, "by Color"), x = "Color", y = var) +
+    theme_minimal()
+})
+
+# Quantiles, means, medians, and standard deviations
+quantiles_means_medians_sds <- data %>%
+  summarise(across(c("fixed_acidity", "volatile_acidity", "citric_acid", 
+                     "residual_sugar", "chlorides", "free_sulfur_dioxide", 
+                     "total_sulfur_dioxide", "density", "pH", "sulphates", 
+                     "alcohol"), list(quantiles = ~quantile(.),
+                                      mean = ~mean(.),
+                                      median = ~median(.),
+                                      sd = ~sd(.))))
+
+# Print summary statistics
+print(summary_stats)
+
+# Display pairwise scatterplots
+print(pairwise_scatterplots)
+
+# Display histograms
+for (hist_plot in histograms) {
+  print(hist_plot)
+}
+
+# Display boxplots
+for (boxplot in boxplots) {
+  print(boxplot)
+}
+
+# Display quantiles, means, medians, and standard deviations
+print(quantiles_means_medians_sds)
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Frequentist Ordinal Regression
+# Read your CSV data
+data <- read.csv("your_data.csv")
+
+# Define the ordinal response variable
+response_var <- as.ordered(data$quality)
+
+# Create a design matrix with predictor variables
+design_matrix <- model.matrix(~ fixed_acidity + volatile_acidity + citric_acid +
+                                  residual_sugar + chlorides + free_sulfur_dioxide +
+                                  total_sulfur_dioxide + density + pH + sulphates +
+                                  alcohol + color, data = data)
+
+# Fit proportional odds model
+proportional_odds_model <- polr(response_var ~ design_matrix, data = data)
+
+# Display summary of the model
+summary(proportional_odds_model)
+```
