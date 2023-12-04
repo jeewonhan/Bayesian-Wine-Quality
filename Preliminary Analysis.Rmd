@@ -37,60 +37,68 @@ knitr::opts_chunk$set(echo = TRUE)
 library("latex2exp")
 library("ggplot2")
 library("MASS")
-library("MCMCpack")
-library(coda)
-library(ordinal)
+#library("MCMCpack")
+library("coda")
+library("dplyr")
+library("tidyr")
+library("caret")
 ```
 
-\markboth{EN.553.671 Homework 6}{Jeewon Han}
-\subsection*{3. }
+\markboth{EN.553.671 Final Project}{Jeewon Han and Lucas Rozendaal}
+\subsection*{Exploratory Data Analysis}
 
 ```{r, warning=FALSE, message=FALSE}
 # Exploratory Data Analysis
-# Load required libraries
-library(ggplot2)
-library(dplyr)
 
 # Read your CSV data
-data <- read.csv("your_data.csv")
+data <- read.csv("winequality-red.csv", sep=';')
 
 # Summary statistics
 summary_stats <- summary(data)
 
+# Features
+features <- c("fixed.acidity", "volatile.acidity", "citric.acid", 
+              "residual.sugar", "chlorides", "free.sulfur.dioxide", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol")
+
 # Pairwise scatterplots
-pairwise_scatterplots <- pairs(data[, c("fixed_acidity", "volatile_acidity", "citric_acid", 
-                                       "residual_sugar", "chlorides", "free_sulfur_dioxide", 
-                                       "total_sulfur_dioxide", "density", "pH", "sulphates", 
-                                       "alcohol")])
+pairwise_scatterplots <- pairs(data[, features])
 
 # Histograms for continuous variables
-histograms <- lapply(data[, c("fixed_acidity", "volatile_acidity", "citric_acid", 
-                               "residual_sugar", "chlorides", "free_sulfur_dioxide", 
-                               "total_sulfur_dioxide", "density", "pH", "sulphates", 
-                               "alcohol")], function(var) {
-  ggplot(data, aes(x = var)) +
+histograms <- lapply(features, function(var) {
+  ggplot(data, aes(x = get(var))) +
     geom_histogram(binwidth = 1, fill = "blue", color = "black", alpha = 0.7) +
     labs(title = paste("Histogram of", var), x = var, y = "Frequency") +
     theme_minimal()
 })
 
-# Boxplots for continuous variables by color
-boxplots <- lapply(data[, c("fixed_acidity", "volatile_acidity", "citric_acid", 
-                            "residual_sugar", "chlorides", "free_sulfur_dioxide", 
-                            "total_sulfur_dioxide", "density", "pH", "sulphates", 
-                            "alcohol")], function(var) {
-  ggplot(data, aes(x = color, y = var, fill = color)) +
-    geom_boxplot() +
-    labs(title = paste("Boxplot of", var, "by Color"), x = "Color", y = var) +
-    theme_minimal()
-})
+# Boxplots - Separated out sulfur since scales much larger
+# Extracting the variables for separate box plots
+sulfur_variables <- c("total.sulfur.dioxide", "free.sulfur.dioxide")
+other_variables <- setdiff(features, sulfur_variables)
+
+# Boxplot for sulfur variables
+boxplot_sulfur <- ggplot(data %>% pivot_longer(cols = sulfur_variables),
+                         aes(x = name, y = value)) +
+  geom_boxplot(fill = "blue", color = "black", alpha = 0.7, width = 0.5) +
+  labs(title = "Boxplots of Sulfur Variables", x = "Variable", y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))
+
+# Boxplot for other variables
+boxplot_other <- ggplot(data %>% pivot_longer(cols = other_variables),
+                        aes(x = name, y = value)) +
+  geom_boxplot(fill = "blue", color = "black", alpha = 0.7, width = 0.5) +
+  labs(title = "Boxplots of Other Variables", x = "Variable", y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))
 
 # Quantiles, means, medians, and standard deviations
 quantiles_means_medians_sds <- data %>%
-  summarise(across(c("fixed_acidity", "volatile_acidity", "citric_acid", 
-                     "residual_sugar", "chlorides", "free_sulfur_dioxide", 
-                     "total_sulfur_dioxide", "density", "pH", "sulphates", 
-                     "alcohol"), list(quantiles = ~quantile(.),
+  summarise(across(features, list(quantiles = ~quantile(.),
                                       mean = ~mean(.),
                                       median = ~median(.),
                                       sd = ~sd(.))))
@@ -106,34 +114,111 @@ for (hist_plot in histograms) {
   print(hist_plot)
 }
 
-# Display boxplots
-for (boxplot in boxplots) {
-  print(boxplot)
-}
+# Display boxplot
+print(boxplot_sulfur)
+print(boxplot_other)
 
 # Display quantiles, means, medians, and standard deviations
 print(quantiles_means_medians_sds)
+```
+```{r, warning=FALSE, message=FALSE}
+# Function to create a scatterplot of two features based on scatterplot matrix
+feature1 <- data$fixed.acidity
+feature <- data$pH
+
+create_scatterplot <- function(data, feature1, feature2) {
+  ggplot(data, aes_string(x = feature1, y = feature2)) +
+    geom_point(color = "blue", size = 3) +
+    labs(title = paste("Scatterplot of", feature1, "vs", feature2),
+         x = feature1, y = feature2) +
+    theme_minimal()
+}
+
+# Example: Create a scatterplot for "fixed.acidity" vs "volatile.acidity"
+scatterplot_example <- create_scatterplot(data, "fixed.acidity", "volatile.acidity")
+
+# Print the scatterplot
+print(scatterplot_example)
 
 ```
 
-
 ```{r, warning=FALSE, message=FALSE}
 # Frequentist Ordinal Regression
-# Read your CSV data
-data <- read.csv("your_data.csv")
 
-# Define the ordinal response variable
-response_var <- as.ordered(data$quality)
+# Assuming you have a data frame named "data" containing your features and labels
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(data$quality, p = 0.8, list = FALSE)
 
-# Create a design matrix with predictor variables
-design_matrix <- model.matrix(~ fixed_acidity + volatile_acidity + citric_acid +
-                                  residual_sugar + chlorides + free_sulfur_dioxide +
-                                  total_sulfur_dioxide + density + pH + sulphates +
-                                  alcohol + color, data = data)
+# Train/Test Split
+train_data <- data[split_index, ]
+test_data <- data[-split_index, ]
 
-# Fit proportional odds model
-proportional_odds_model <- polr(response_var ~ design_matrix, data = data)
+# Backward elimination for the most parsimonious model
+all_features <- setdiff(names(train_data), "quality")
+selected_features <- all_features
+best_accuracy <- 0
+best_feature_set <- NULL
+best_num_variables <- Inf  # Initialize with a large value
 
-# Display summary of the model
-summary(proportional_odds_model)
+while (length(selected_features) >= 1) {
+  current_accuracy <- 0
+  current_num_variables <- length(selected_features)
+  worst_feature <- NULL
+  exit_loop <- FALSE  # Flag to control loop exit
+  
+  for (feature in selected_features) {
+    current_features <- setdiff(selected_features, feature)
+    
+    if (length(current_features) == 0) {
+      exit_loop <- TRUE
+      break  # Exit the inner loop when only one feature is left
+    }
+    
+    # Train the model with the current set of features
+    model <- polr(factor(quality) ~ ., data = train_data[, c("quality", current_features)], Hess = TRUE)
+    
+    # Predict using the trained model on the test set
+    # (Ensure test_data is also a data frame)
+    predicted_labels <- predict(model, newdata = as.data.frame(test_data))
+    
+    # Convert predicted and true labels to integers (if not already)
+    predicted_labels <- as.integer(predicted_labels)
+    true_labels <- as.integer(test_data$quality)
+    
+    # Compute accuracy
+    accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+    
+    # Update the current accuracy, worst feature, and number of variables if needed
+    if (accuracy > current_accuracy) {
+      current_accuracy <- accuracy
+      worst_feature <- feature
+      current_num_variables <- length(current_features)
+    }
+  }
+    
+  if (exit_loop) {
+    break  # Exit the outer loop when only one feature is left
+  }
+  
+  
+  # Remove the worst feature from the selected features
+  selected_features <- setdiff(selected_features, worst_feature)
+  
+  # Update the best feature set, accuracy, and number of variables if needed
+  if (current_accuracy > best_accuracy || 
+      (current_accuracy == best_accuracy && current_num_variables < best_num_variables)) {
+    best_accuracy <- current_accuracy
+    best_feature_set <- selected_features
+    best_num_variables <- current_num_variables
+  }
+  
+  cat("Selected features:", selected_features, "\n")
+  cat("Current accuracy:", current_accuracy, "\n")
+  cat("Current number of variables:", current_num_variables, "\n\n")
+
+}
+
+cat("Best feature set:", best_feature_set, "\n")
+cat("Best accuracy:", best_accuracy, "\n")
+cat("Best number of variables:", best_num_variables, "\n")
 ```
