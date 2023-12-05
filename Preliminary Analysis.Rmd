@@ -42,6 +42,8 @@ library("coda")
 library("dplyr")
 library("tidyr")
 library("caret")
+library("reshape2")
+library("DescTools")
 ```
 
 \markboth{EN.553.671 Final Project}{Jeewon Han and Lucas Rozendaal}
@@ -61,9 +63,27 @@ features <- c("fixed.acidity", "volatile.acidity", "citric.acid",
               "residual.sugar", "chlorides", "free.sulfur.dioxide", 
               "total.sulfur.dioxide", "density", "pH", "sulphates", 
               "alcohol")
+all_features <- c("fixed.acidity", "volatile.acidity", "citric.acid", 
+              "residual.sugar", "chlorides", "free.sulfur.dioxide", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol", "quality")
 
 # Pairwise scatterplots
-pairwise_scatterplots <- pairs(data[, features])
+pairwise_scatterplots <- pairs(data[, all_features])
+
+# Assuming your data frame is named "data"
+correlation_matrix <- cor(data[, all_features])
+
+# Convert the correlation matrix to a long format
+correlation_long <- melt(correlation_matrix)
+
+# Create a heatmap using ggplot2
+heatmap <- ggplot(data = correlation_long, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  theme_minimal() +
+  labs(title = "Correlation Heatmap", x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 # Histograms for continuous variables
 histograms <- lapply(features, function(var) {
@@ -73,10 +93,16 @@ histograms <- lapply(features, function(var) {
     theme_minimal()
 })
 
+histograms_quality <- ggplot(data, aes(x = data$quality)) +
+    geom_histogram(bins=10, fill = "blue", color = "black", alpha = 0.7) +
+    labs(title = "Histogram of Quality", x = "Quality", y = "Frequency") +
+    theme_minimal()
+  
+
 # Boxplots - Separated out sulfur since scales much larger
 # Extracting the variables for separate box plots
 sulfur_variables <- c("total.sulfur.dioxide", "free.sulfur.dioxide")
-other_variables <- setdiff(features, sulfur_variables)
+other_variables <- setdiff(all_features, sulfur_variables)
 
 # Boxplot for sulfur variables
 boxplot_sulfur <- ggplot(data %>% pivot_longer(cols = sulfur_variables),
@@ -101,7 +127,9 @@ quantiles_means_medians_sds <- data %>%
   summarise(across(features, list(quantiles = ~quantile(.),
                                       mean = ~mean(.),
                                       median = ~median(.),
-                                      sd = ~sd(.))))
+                                      sd = ~sd(.),
+                                      min = ~min(.),
+                                      max = ~max(.))))
 
 # Print summary statistics
 print(summary_stats)
@@ -109,10 +137,14 @@ print(summary_stats)
 # Display pairwise scatterplots
 print(pairwise_scatterplots)
 
+# Display Heatmap
+print(heatmap)
+
 # Display histograms
 for (hist_plot in histograms) {
   print(hist_plot)
 }
+print(histograms_quality)
 
 # Display boxplot
 print(boxplot_sulfur)
@@ -154,8 +186,15 @@ train_data <- data[split_index, ]
 test_data <- data[-split_index, ]
 
 # Backward elimination for the most parsimonious model
-all_features <- setdiff(names(train_data), "quality")
-selected_features <- all_features
+features_reg <- c("fixed.acidity",
+              "residual.sugar", "chlorides", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol")
+  # take out variables with high correlaiton
+all_features <- setdiff(features_reg, "quality")
+#selected_features <- all_features
+selected_features <- c(all_features, "fixed.acidity*density", "alcohol*density")
+  # include interaction terms
 best_accuracy <- 0
 best_feature_set <- NULL
 best_num_variables <- Inf  # Initialize with a large value
@@ -175,7 +214,8 @@ while (length(selected_features) >= 1) {
     }
     
     # Train the model with the current set of features
-    model <- polr(factor(quality) ~ ., data = train_data[, c("quality", current_features)], Hess = TRUE)
+    formula_str <- paste("factor(quality) ~ ", paste(current_features, collapse = "+"), sep = "")
+    model <- polr(as.formula(formula_str), data = train_data, Hess = TRUE)
     
     # Predict using the trained model on the test set
     # (Ensure test_data is also a data frame)
@@ -222,3 +262,99 @@ cat("Best feature set:", best_feature_set, "\n")
 cat("Best accuracy:", best_accuracy, "\n")
 cat("Best number of variables:", best_num_variables, "\n")
 ```
+```{r}
+# Baseline model: Assigning the most common quality rating to all observations
+most_common_quality <- Mode(train_data$quality)
+baseline_prediction <- rep(most_common_quality, nrow(test_data))
+
+# Convert predicted and true labels to integers (if not already)
+predicted_labels_baseline <- as.integer(baseline_prediction)
+true_labels <- as.integer(test_data$quality)
+
+# Compute accuracy for the baseline model
+accuracy_baseline <- sum(predicted_labels_baseline == true_labels) / length(true_labels)
+
+cat("Accuracy for the baseline model:", accuracy_baseline, "\n")
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Backward elimination for the most parsimonious model
+features_reg <- c("fixed.acidity",
+              "residual.sugar", "chlorides", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol")
+  # take out variables with high correlaiton
+all_features <- setdiff(features, "quality")
+#selected_features <- all_features
+selected_features <- c(all_features, "fixed.acidity*density", "alcohol*density")
+  # include interaction terms
+best_accuracy <- 0
+best_feature_set <- NULL
+best_num_variables <- Inf  # Initialize with a large value
+
+while (length(selected_features) >= 1) {
+  current_accuracy <- 0
+  current_num_variables <- length(selected_features)
+  worst_feature <- NULL
+  exit_loop <- FALSE  # Flag to control loop exit
+  
+  for (feature in selected_features) {
+    current_features <- setdiff(selected_features, feature)
+    
+    if (length(current_features) == 0) {
+      exit_loop <- TRUE
+      break  # Exit the inner loop when only one feature is left
+    }
+    
+    # Train the model with the current set of features
+    formula_str <- paste("quality ~ ", paste(current_features, collapse = "+"), sep = "")
+    model <- lm(as.formula(formula_str), data = train_data, Hess = TRUE)
+    
+    # Predict using the trained model on the test set
+    # (Ensure test_data is also a data frame)
+    predicted_labels <- predict(model, newdata = as.data.frame(test_data))
+    
+    # Convert predicted and true labels to integers (if not already)
+    predicted_labels <- as.integer(predicted_labels)
+    true_labels <- as.integer(test_data$quality)
+    
+    # Compute accuracy
+    accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+    
+    # Update the current accuracy, worst feature, and number of variables if needed
+    if (accuracy > current_accuracy) {
+      current_accuracy <- accuracy
+      worst_feature <- feature
+        # worst feature = feature that results in highest increase in accuracy when removed
+      current_num_variables <- length(current_features)
+    }
+  }
+    
+  if (exit_loop) {
+    break  # Exit the outer loop when only one feature is left
+  }
+  
+  
+  # Remove the worst feature from the selected features
+  selected_features <- setdiff(selected_features, worst_feature)
+  
+  # Update the best feature set, accuracy, and number of variables if needed
+  if (current_accuracy > best_accuracy || 
+      (current_accuracy == best_accuracy && current_num_variables < best_num_variables)) {
+    best_accuracy <- current_accuracy
+    best_feature_set <- selected_features
+    best_num_variables <- current_num_variables
+  }
+  
+  cat("Selected features:", selected_features, "\n")
+  cat("Current accuracy:", current_accuracy, "\n")
+  cat("Current number of variables:", current_num_variables, "\n\n")
+
+}
+
+cat("Best feature set:", best_feature_set, "\n")
+cat("Best accuracy:", best_accuracy, "\n")
+cat("Best number of variables:", best_num_variables, "\n")
+```
+
