@@ -190,6 +190,7 @@ ggplot(plot_data, aes(x = Rank, y = Probability)) +
   theme_minimal()
 
 ```
+
 ```{r, warning=FALSE, message=FALSE}
 # Function to create a scatterplot of two features based on scatterplot matrix
 create_scatterplot <- function(standardized_data, feature1, feature2) {
