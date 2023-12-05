@@ -51,12 +51,33 @@ library("DescTools")
 
 ```{r, warning=FALSE, message=FALSE}
 # Exploratory Data Analysis
+getwd()
+rm(list = ls())
+
+#try standardizing the data and seeing if that helps
+#try splitting the categories into good vs bad
 
 # Read your CSV data
 data <- read.csv("winequality-red.csv", sep=';')
+# Extract the "quality" column
+quality_column <- data$quality
+
+# Standardize all columns except the "quality" column
+standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
+
+# Add the "quality" column back to the standardized dataframe
+standardized_data <- cbind(quality = quality_column, standardized_data)
+
+standardized_data$ordinal_quality <- cut(standardized_data$quality, 
+                     breaks = c(-Inf, 4.5, 5.5, Inf), 
+                     labels = c(1, 2, 3),
+                     include.lowest = TRUE)
+
+# If you want to convert the new_column to numeric type
+standardized_data$ordinal_quality <- as.numeric(standardized_data$ordinal_qualit)
 
 # Summary statistics
-summary_stats <- summary(data)
+summary_stats <- summary(standardized_data)
 
 # Features
 features <- c("fixed.acidity", "volatile.acidity", "citric.acid", 
@@ -69,10 +90,10 @@ all_features <- c("fixed.acidity", "volatile.acidity", "citric.acid",
               "alcohol", "quality")
 
 # Pairwise scatterplots
-pairwise_scatterplots <- pairs(data[, all_features])
+pairwise_scatterplots <- pairs(standardized_data[, all_features])
 
 # Assuming your data frame is named "data"
-correlation_matrix <- cor(data[, all_features])
+correlation_matrix <- cor(standardized_data[, all_features])
 
 # Convert the correlation matrix to a long format
 correlation_long <- melt(correlation_matrix)
@@ -87,13 +108,13 @@ heatmap <- ggplot(data = correlation_long, aes(x = Var1, y = Var2, fill = value)
 
 # Histograms for continuous variables
 histograms <- lapply(features, function(var) {
-  ggplot(data, aes(x = get(var))) +
+  ggplot(standardized_data, aes(x = get(var))) +
     geom_histogram(binwidth = 1, fill = "blue", color = "black", alpha = 0.7) +
     labs(title = paste("Histogram of", var), x = var, y = "Frequency") +
     theme_minimal()
 })
 
-histograms_quality <- ggplot(data, aes(x = data$quality)) +
+histograms_quality <- ggplot(standardized_data, aes(x = data$quality)) +
     geom_histogram(bins=10, fill = "blue", color = "black", alpha = 0.7) +
     labs(title = "Histogram of Quality", x = "Quality", y = "Frequency") +
     theme_minimal()
@@ -123,7 +144,7 @@ boxplot_other <- ggplot(data %>% pivot_longer(cols = other_variables),
   scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))
 
 # Quantiles, means, medians, and standard deviations
-quantiles_means_medians_sds <- data %>%
+quantiles_means_medians_sds <- standardized_data %>%
   summarise(across(features, list(quantiles = ~quantile(.),
                                       mean = ~mean(.),
                                       median = ~median(.),
@@ -152,14 +173,27 @@ print(boxplot_other)
 
 # Display quantiles, means, medians, and standard deviations
 print(quantiles_means_medians_sds)
+
+#Plot the probability distribution for quality ratings
+# Calculate probabilities of each ranking
+rank_probs <- prop.table(table(standardized_data$quality))
+
+# Create a dataframe for probabilities
+plot_data <- data.frame(Rank = as.numeric(names(rank_probs)), Probability = as.vector(rank_probs))
+
+# Create the ggplot
+ggplot(plot_data, aes(x = Rank, y = Probability)) +
+  geom_bar(stat = "identity", fill = "blue", color = "black", alpha = 0.7, width = 0.5) +
+  labs(title = "Probability Distribution of Quality Ratings",
+       x = "Quality Rating",
+       y = "Probability") +
+  theme_minimal()
+
 ```
 ```{r, warning=FALSE, message=FALSE}
 # Function to create a scatterplot of two features based on scatterplot matrix
-feature1 <- data$fixed.acidity
-feature <- data$pH
-
-create_scatterplot <- function(data, feature1, feature2) {
-  ggplot(data, aes_string(x = feature1, y = feature2)) +
+create_scatterplot <- function(standardized_data, feature1, feature2) {
+  ggplot(standardized_data, aes_string(x = feature1, y = feature2)) +
     geom_point(color = "blue", size = 3) +
     labs(title = paste("Scatterplot of", feature1, "vs", feature2),
          x = feature1, y = feature2) +
@@ -167,7 +201,7 @@ create_scatterplot <- function(data, feature1, feature2) {
 }
 
 # Example: Create a scatterplot for "fixed.acidity" vs "volatile.acidity"
-scatterplot_example <- create_scatterplot(data, "fixed.acidity", "volatile.acidity")
+scatterplot_example <- create_scatterplot(standardized_data, "density", "fixed.acidity")
 
 # Print the scatterplot
 print(scatterplot_example)
@@ -175,15 +209,102 @@ print(scatterplot_example)
 ```
 
 ```{r, warning=FALSE, message=FALSE}
-# Frequentist Ordinal Regression
+# Frequentist Ordinal Regression (on our reduced 3-category ordinal quality column)
 
 # Assuming you have a data frame named "data" containing your features and labels
 set.seed(123)  # Set seed for reproducibility
-split_index <- createDataPartition(data$quality, p = 0.8, list = FALSE)
+split_index <- createDataPartition(standardized_data$ordinal_quality, p = 0.8, list = FALSE)
 
 # Train/Test Split
-train_data <- data[split_index, ]
-test_data <- data[-split_index, ]
+train_data <- standardized_data[split_index, ]
+test_data <- standardized_data[-split_index, ]
+
+# Backward elimination for the most parsimonious model
+features_reg <- c("fixed.acidity",
+              "residual.sugar", "chlorides", 
+              "total.sulfur.dioxide", "density", "sulphates", 
+              "alcohol")
+  # take out variables with high correlaiton
+all_features <- setdiff(features_reg, "ordinal_quality")
+selected_features <- c(all_features, "fixed.acidity*density", "alcohol*density")
+  # include interaction terms
+best_accuracy <- 0
+best_feature_set <- NULL
+best_num_variables <- Inf  # Initialize with a large value
+
+while (length(selected_features) >= 1) {
+  current_accuracy <- 0
+  current_num_variables <- length(selected_features)
+  worst_feature <- NULL
+  exit_loop <- FALSE  # Flag to control loop exit
+  
+  for (feature in selected_features) {
+    current_features <- setdiff(selected_features, feature)
+    
+    if (length(current_features) == 0) {
+      exit_loop <- TRUE
+      break  # Exit the inner loop when only one feature is left
+    }
+    
+    # Train the model with the current set of features
+    formula_str <- paste("factor(ordinal_quality) ~ ", paste(current_features, collapse = "+"), sep = "")
+    model <- polr(as.formula(formula_str), data = train_data, Hess = TRUE)
+    
+    # Predict using the trained model on the test set
+    # (Ensure test_data is also a data frame)
+    predicted_labels <- predict(model, newdata = as.data.frame(test_data))
+    
+    # Convert predicted and true labels to integers (if not already)
+    predicted_labels <- as.integer(predicted_labels)
+    true_labels <- as.integer(test_data$ordinal_quality)
+    
+    # Compute accuracy
+    accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+    
+    # Update the current accuracy, worst feature, and number of variables if needed
+    if (accuracy > current_accuracy) {
+      current_accuracy <- accuracy
+      worst_feature <- feature
+      current_num_variables <- length(current_features)
+    }
+  }
+    
+  if (exit_loop) {
+    break  # Exit the outer loop when only one feature is left
+  }
+  
+  
+  # Remove the worst feature from the selected features
+  selected_features <- setdiff(selected_features, worst_feature)
+  
+  # Update the best feature set, accuracy, and number of variables if needed
+  if (current_accuracy > best_accuracy || 
+      (current_accuracy == best_accuracy && current_num_variables < best_num_variables)) {
+    best_accuracy <- current_accuracy
+    best_feature_set <- selected_features
+    best_num_variables <- current_num_variables
+  }
+  
+  cat("Selected features:", selected_features, "\n")
+  cat("Current accuracy:", current_accuracy, "\n")
+  cat("Current number of variables:", current_num_variables, "\n\n")
+
+}
+
+cat("Best feature set:", best_feature_set, "\n")
+cat("Best accuracy:", best_accuracy, "\n")
+cat("Best number of variables:", best_num_variables, "\n")
+```
+```{r, warning=FALSE, message=FALSE}
+# Frequentist Ordinal Regression (on the full 0-10 quality column)
+
+# Assuming you have a data frame named "data" containing your features and labels
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(standardized_data$quality, p = 0.8, list = FALSE)
+
+# Train/Test Split
+train_data <- standardized_data[split_index, ]
+test_data <- standardized_data[-split_index, ]
 
 # Backward elimination for the most parsimonious model
 features_reg <- c("fixed.acidity",
@@ -262,6 +383,8 @@ cat("Best feature set:", best_feature_set, "\n")
 cat("Best accuracy:", best_accuracy, "\n")
 cat("Best number of variables:", best_num_variables, "\n")
 ```
+
+
 ```{r}
 # Baseline model: Assigning the most common quality rating to all observations
 most_common_quality <- Mode(train_data$quality)
