@@ -74,7 +74,7 @@ standardized_data$ordinal_quality <- cut(standardized_data$quality,
                      include.lowest = TRUE)
 
 # If you want to convert the new_column to numeric type
-standardized_data$ordinal_quality <- as.numeric(standardized_data$ordinal_qualit)
+standardized_data$ordinal_quality <- as.numeric(standardized_data$ordinal_quality)
 
 # Summary statistics
 summary_stats <- summary(standardized_data)
@@ -296,6 +296,7 @@ cat("Best feature set:", best_feature_set, "\n")
 cat("Best accuracy:", best_accuracy, "\n")
 cat("Best number of variables:", best_num_variables, "\n")
 ```
+
 ```{r, warning=FALSE, message=FALSE}
 # Frequentist Ordinal Regression (on the full 0-10 quality column)
 
@@ -408,7 +409,7 @@ features_reg <- c("fixed.acidity",
               "residual.sugar", "chlorides", 
               "total.sulfur.dioxide", "density", "pH", "sulphates", 
               "alcohol")
-  # take out variables with high correlaiton
+  # take out variables with high correlation
 all_features <- setdiff(features, "quality")
 #selected_features <- all_features
 selected_features <- c(all_features, "fixed.acidity*density", "alcohol*density")
@@ -482,3 +483,18 @@ cat("Best accuracy:", best_accuracy, "\n")
 cat("Best number of variables:", best_num_variables, "\n")
 ```
 
+```{r}
+# Baseline model: Assigning the most common quality rating to all observations
+most_common_quality <- Mode(train_data$ordinal_quality)
+baseline_prediction <- rep(most_common_quality, nrow(test_data))
+
+# Convert predicted and true labels to integers (if not already)
+predicted_labels_baseline <- as.integer(baseline_prediction)
+true_labels <- as.integer(test_data$ordinal_quality)
+
+# Compute accuracy for the baseline model
+accuracy_baseline <- sum(predicted_labels_baseline == true_labels) / length(true_labels)
+
+cat("Accuracy for the baseline model:", accuracy_baseline, "\n")
+
+```
