@@ -5,32 +5,42 @@ date: "2023-11-28"
 ---
 
 ```{r, warning=FALSE, message=FALSE}
-#### Social mobility data
-load("socmob.RData") 
+# Data
+data <- read.csv("winequality-red.csv", sep=';')
+quality_column <- data$quality
 
-yincc<-match(socmob$INC,sort(unique(socmob$INC)))
-ydegr<-socmob$DEGREE+1
-yage<-socmob$AGE
-ychild<-socmob$CHILD
-ypdeg<-1*(socmob$PDEG>2)
-tmp<-lm(ydegr~ychild+ypdeg+ychild:ypdeg)
+# Standardize all columns except the "quality" column
+standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
 
+# Add the "quality" column back to the standardized dataframe
+standardized_data <- cbind(quality = quality_column, standardized_data)
 
+# Add ordinal_quality - don't do when doing quality
+standardized_data$ordinal_quality <- cut(standardized_data$quality, 
+                     breaks = c(-Inf, 4.5, 5.5, Inf), 
+                     labels = c(1, 2, 3),
+                     include.lowest = TRUE)
 
-#### Figure 12.1
-pdf("fig12_1.pdf",family="Times",height=3.5,width=7)
-par(mar=c(3,3,1,1),mgp=c(1.75,.75,0))
-par(mfrow=c(1,2))
-plot(table(socmob$DEG+1)/sum(table(socmob$DEG+1)),
-  lwd=2,type="h",xlab="DEG",ylab="probability")
-plot(table(socmob$CHILD)/sum(table(socmob$CHILD)),lwd=2,type="h",xlab="CHILD",ylab="probability" )
-dev.off()
+# Convert the new_column to numeric type
+standardized_data$ordinal_quality <- as.numeric(standardized_data$ordinal_quality)
 
+# DROP QUALITY COLUMN - when doing ordinal quality
+standardized_data <- standardized_data[, !(names(standardized_data) %in% c("quality"))]
 
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(standardized_data$ordinal_quality, p = 0.8, list = FALSE)
+train_data <- standardized_data[split_index, ]
+test_data <- standardized_data[-split_index, ]
+
+yordquality<-match(train_data$ordinal_quality,sort(unique(train_data$ordinal_quality)))
+
+# Regress on all 
+tmp<-lm(yordquality ~ ., data=train_data)
 
 #####
-X<-cbind(ychild,ypdeg,ychild*ypdeg)
-y<-ydegr
+X<-as.matrix(train_data[, !grepl("ordinal_quality", names(train_data))]) # drop Y column
+y<-train_data$ordinal_quality
 keep<- (1:length(y))[ !is.na( apply( cbind(X,y),1,mean) ) ]
 X<-X[keep,] ; y<-y[keep]
 ranks<-match(y,sort(unique(y))) ; uranks<-sort(unique(ranks))
@@ -46,7 +56,7 @@ z<-qnorm(rank(y,ties.method="random")/(n+1))
 g<-rep(NA,length(uranks)-1)
 K<-length(uranks)
 BETA<-matrix(NA,1000,p) ; Z<-matrix(NA,1000,n) ; ac<-0
-mu<-rep(0,K-1) ; sigma<-rep(100,K-1) 
+mu<-rep(0,K-1) ; sigma<-rep(1,K-1) 
 
 ## MCMC
 S<-25000
@@ -88,64 +98,147 @@ for(s in 1:S)
     BETA[s/(S/1000),]<-  beta
     Z[s/(S/1000),]<- z
   }
-} 
+}
+
+# Assuming BETA and Z matrices are available from the MCMC sampling
+
+# Extract mean values from MCMC samples
+mean_beta <- colMeans(BETA, na.rm = TRUE)
+
+# Extract relevant columns from the test set
+X_test <- as.matrix(test_data[, !grepl("ordinal_quality", names(test_data))])
+
+# Make predictions using the mean of MCMC samples
+final_predictions <- X_test %*% mean_beta
+
+# Convert predictions to ordinal labels
+predicted_labels <- cut(final_predictions, 
+                        breaks = c(-Inf, 1.5, 2.5, Inf), 
+                        labels = c(1, 2, 3), 
+                        include.lowest = TRUE)
+
+# Evaluate the predictions (assuming you have true ordinal_quality values for the test set)
+confusion_matrix <- table(predicted_labels, test_data$ordinal_quality)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+# Print the confusion matrix and accuracy
+print("Confusion Matrix:")
+print(confusion_matrix)
+print(paste("Accuracy:", round(accuracy, 4)))
+```
+
+```{r, warning=FALSE, message=FALSE}
+### QUALITY, NOT ORDINAL_QUALITY
+
+# Data
+data <- read.csv("winequality-red.csv", sep=';')
+quality_column <- data$quality
+
+# Standardize all columns except the "quality" column
+standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
+
+# Add the "quality" column back to the standardized dataframe
+standardized_data <- cbind(quality = quality_column, standardized_data)
+
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(standardized_data$quality, p = 0.8, list = FALSE)
+train_data <- standardized_data[split_index, ]
+test_data <- standardized_data[-split_index, ]
+
+yquality<-match(train_data$quality,sort(unique(train_data$quality)))
+
+# Regress on all 
+tmp<-lm(yquality ~ ., data=train_data)
+
+#####
+X<-as.matrix(train_data[, !grepl("quality", names(train_data))]) # drop Y column
+y<-train_data$quality
+keep<- (1:length(y))[ !is.na( apply( cbind(X,y),1,mean) ) ]
+X<-X[keep,] ; y<-y[keep]
+ranks<-match(y,sort(unique(y))) ; 
+uranks<-sort(unique(ranks))
+#ranks<-10 ; 
+#uranks<-10 ;
+n<-dim(X)[1] ; p<-dim(X)[2]
+iXX<-solve(t(X)%*%X)  ; V<-iXX*(n/(n+1)) ; cholV<-chol(V)
+
+#### Ordinal probit regression
+
+## setup
+set.seed(1)
+beta<-rep(0,p) 
+z<-qnorm(rank(y,ties.method="random")/(n+1))
+g<-rep(NA,length(uranks)-1)
+K<-length(uranks)
+BETA<-matrix(NA,1000,p) ; Z<-matrix(NA,1000,n) ; ac<-0
+mu<-rep(0,K-1) ; sigma<-rep(100,K-1) 
+
+## MCMC
+S<-25000
+for(s in 1:S) 
+{
+
+  #update g 
+  for(k in 3:(K-1+3)) # shift up by 3
+  {
+  a<-max(z[y==k])
+  b<-min(z[y==k+1])
+  u<-runif(1, pnorm( (a-mu[k])/sigma[k] ),
+              pnorm( (b-mu[k])/sigma[k] ) )
+  g[k]<- mu[k] + sigma[k]*qnorm(u)
+  }
+
+  #update beta
+  E<- V%*%( t(X)%*%z )
+  beta<- cholV%*%rnorm(p) + E
+
+  #update z
+  ez<-X%*%beta
+  a<-c(-Inf,g)[ match( y-1, 0:K) ]
+  b<-c(g,Inf)[y]  
+  u<-runif(n, pnorm(a-ez),pnorm(b-ez) )
+  z<- ez + qnorm(u)
 
 
+  #help mixing
+  c<-rnorm(1,0,n^(-1/3))  
+  zp<-z+c ; gp<-g+c
+  lhr<-  sum(dnorm(zp,ez,1,log=T) - dnorm(z,ez,1,log=T) ) + 
+         sum(dnorm(gp,mu,sigma,log=T) - dnorm(g,mu,sigma,log=T) )
+  if(log(runif(1))<lhr) { z<-zp ; g<-gp ; ac<-ac+1 }
 
-#### Figure 12.2
-pdf("fig12_2.pdf",family="Times",height=3.5,width=7)
-par(mar=c(3,3,1,1),mgp=c(1.75,.75,0))
-par(mfrow=c(1,2))
-plot(X[,1]+.25*(X[,2]),Z[1000,],
- pch=15+X[,2],col=c("gray","black")[X[,2]+1],
- xlab="number of children",ylab="z", ylim=range(c(-2.5,4,Z[1000,])),
-    xlim=c(0,9))
+  if(s%%(S/1000)==0) 
+  { 
+    cat(s/S,ac/s,"\n")
+    BETA[s/(S/1000),]<-  beta
+    Z[s/(S/1000),]<- z
+  }
+}
 
-beta.pm<-apply(BETA,2,mean)
-ZPM<-apply(Z,2,mean)
-abline(0,beta.pm[1],lwd=2 ,col="gray")
-abline(beta.pm[2],beta.pm[1]+beta.pm[3],col="black",lwd=2 )
-legend(5,4,legend=c("PDEG=0","PDEG=1"),pch=c(15,16),col=c("gray","black"))
+# Assuming BETA and Z matrices are available from the MCMC sampling
 
+# Extract mean values from MCMC samples
+mean_beta <- colMeans(BETA, na.rm = TRUE)
 
-plot(density(BETA[,3],adj=2),lwd=2,xlim=c(-.5,.5),main="",
-    xlab=expression(beta[3]),ylab="density")
-sd<-sqrt(  solve(t(X)%*%X/n)[3,3] )
-x<-seq(-.7,.7,length=100)
-lines(x,dnorm(x,0,sd),lwd=2,col="gray")
-legend(-.5,6.5,legend=c("prior","posterior"),lwd=c(2,2),col=c("gray","black"),bty="n")
-dev.off()
+# Extract relevant columns from the test set
+X_test <- as.matrix(test_data[, !grepl("quality", names(test_data))])
 
+# Make predictions using the mean of MCMC samples
+final_predictions <- X_test %*% mean_beta
 
-#### Rank likelihood regression 
-beta.pm<-apply(BETA,2,mean)
-beta.pm[1]+beta.pm[3]
-quantile(BETA[,3],prob=c(.025,.0975))
-quantile(BETA[,3],prob=c(0.025,0.975))
+# Convert predictions to ordinal labels
+predicted_labels_original <- cut(final_predictions, 
+                                  breaks = c(-Inf, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5), 
+                                  labels = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 
+                                  include.lowest = TRUE)
 
-source("rlreg.R")
-rfit<-treg(y,X)
+# Evaluate the predictions (assuming you have true ordinal_quality values for the test set)
+confusion_matrix <- table(predicted_labels, test_data$quality)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
 
-
-
-#### Figure 12.3
-pdf("fig12_3.pdf",family="Times",height=1.75,width=5) 
-par(mfrow=c(1,3),mar=c(2.75,2.75,.5,.5),mgp=c(1.7,.7,0))
-lab<-c(expression(beta[1]),expression(beta[2]),expression(beta[3]))
-ymx<-c(12,3.1,7.25)
-laby<-c("density","","")
-for(j in 1:3) {
-plot(density(rfit$BETA[,j],adj=2),lwd=2,main="",
- xlab=lab[j],col="black",ylim=c(0,ymx[j]),ylab=laby[j])
-lines(density(BETA[,j],adj=2),col="gray",lwd=2)
-if(j==4) {
- legend(-.2,12,legend=c("ordered probit","rank likelihood"), 
-       lwd=c(2,2),col=c("gray","black"))
-          } 
-               }
-dev.off()
-
-
-#### The copula example can be implemented with the `sbgcop` package 
-
+# Print the confusion matrix and accuracy
+print("Confusion Matrix:")
+print(confusion_matrix)
+print(paste("Accuracy:", round(accuracy, 4)))
 ```
