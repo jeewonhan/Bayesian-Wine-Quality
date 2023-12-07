@@ -498,3 +498,51 @@ accuracy_baseline <- sum(predicted_labels_baseline == true_labels) / length(true
 cat("Accuracy for the baseline model:", accuracy_baseline, "\n")
 
 ```
+
+```{r}
+# Data
+data <- read.csv("winequality-red.csv", sep=';')
+quality_column <- data$quality
+
+# Standardize all columns except the "quality" column
+standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
+
+# Add the "quality" column back to the standardized dataframe
+standardized_data <- cbind(quality = quality_column, standardized_data)
+
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(standardized_data$quality, p = 0.8, list = FALSE)
+train_data <- standardized_data[split_index, ]
+test_data <- standardized_data[-split_index, ]
+
+features_reg <- c("fixed.acidity",
+              "residual.sugar", "chlorides", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol")
+  # take out variables with high correlation
+all_features <- setdiff(features, "quality")
+#selected_features <- all_features
+selected_features <- c(all_features, "fixed.acidity*density", "alcohol*density")
+
+initial_model <- polr(factor(quality) ~ ., data = train_data, method = "logistic")
+
+# Perform backward elimination using stepwise regression
+final_model <- step(initial_model, direction = "backward")
+final_model <- step(initial_model, direction = "backward", criterion = "p-value")
+
+# Display the final model
+summary(final_model)
+
+X_test <- as.matrix(test_data[, !grepl("quality", names(test_data))])
+predicted_labels <- predict(final_model, newdata = X_test)
+predicted_labels <- as.integer(predicted_labels)
+
+# Convert predicted and true labels to integers (if not already)
+predicted_labels <- as.integer(predicted_labels)
+true_labels <- as.integer(test_data$quality)
+
+# Compute accuracy
+accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+print(accuracy)
+```
