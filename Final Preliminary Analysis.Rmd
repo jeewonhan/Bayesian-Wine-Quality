@@ -1,0 +1,391 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library("latex2exp")
+library("ggplot2")
+library("MASS")
+#library("MCMCpack")
+library("coda")
+library("dplyr")
+library("tidyr")
+library("caret")
+library("reshape2")
+library("DescTools")
+```
+
+```{r, warning=FALSE, message=FALSE}
+### Exploratory Data Analysis
+# Import Data
+data <- read.csv("winequality-red.csv", sep=';')
+quality_column <- data$quality
+summary_stats <- summary(data)
+features <- c("fixed.acidity", "volatile.acidity", "citric.acid", 
+              "residual.sugar", "chlorides", "free.sulfur.dioxide", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol")
+all_features <- c("fixed.acidity", "volatile.acidity", "citric.acid", 
+              "residual.sugar", "chlorides", "free.sulfur.dioxide", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol", "quality")
+
+# Scatterplots
+pairwise_scatterplots <- pairs(data[, all_features])
+
+# Heatmap
+correlation_matrix <- cor(data[, all_features])
+correlation_long <- melt(correlation_matrix)
+heatmap <- ggplot(data = correlation_long, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  theme_minimal() +
+  labs(title = "Correlation Heatmap", x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Histograms for Continuous Variables
+histograms <- lapply(features, function(var) {
+  ggplot(data, aes(x = get(var))) +
+    geom_histogram(binwidth = 1, fill = "blue", color = "black", alpha = 0.7) +
+    labs(title = paste("Histogram of", var), x = var, y = "Frequency") +
+    theme_minimal()
+})
+
+histograms_quality <- ggplot(data, aes(x = data$quality)) +
+    geom_histogram(bins=10, fill = "blue", color = "black", alpha = 0.7) +
+    labs(title = "Histogram of Quality", x = "Quality", y = "Frequency") +
+    theme_minimal()
+
+# Boxplots - Separated Out Sulfur Variables Since Scales Much Larger
+sulfur_variables <- c("total.sulfur.dioxide", "free.sulfur.dioxide")
+other_variables <- setdiff(all_features, sulfur_variables)
+
+# Boxplot for Sulfur Variables
+boxplot_sulfur <- ggplot(data %>% pivot_longer(cols = sulfur_variables),
+                         aes(x = name, y = value)) +
+  geom_boxplot(fill = "blue", color = "black", alpha = 0.7, width = 0.5) +
+  labs(title = "Boxplots of Sulfur Variables", x = "Variable", y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))
+
+# Boxplot for Other Variables
+boxplot_other <- ggplot(data %>% pivot_longer(cols = other_variables),
+                        aes(x = name, y = value)) +
+  geom_boxplot(fill = "blue", color = "black", alpha = 0.7, width = 0.5) +
+  labs(title = "Boxplots of Other Variables", x = "Variable", y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))
+
+#Plot Probability Distributions
+rank_probs <- prop.table(table(data$quality))
+plot_data <- data.frame(Rank = as.numeric(names(rank_probs)), Probability = as.vector(rank_probs))
+data_prob <- ggplot(plot_data, aes(x = Rank, y = Probability)) +
+  geom_bar(stat = "identity", fill = "blue", color = "black", alpha = 0.7, width = 0.5) +
+  labs(title = "Probability Distribution of Quality Ratings",
+       x = "Quality Rating",
+       y = "Probability") +
+  theme_minimal()
+
+# Display Summary Statistics
+print(summary_stats)
+
+# Display Scatterplots
+print(pairwise_scatterplots)
+
+# Display Heatmap
+print(heatmap)
+
+# Display Histograms
+for (hist_plot in histograms) {
+  print(hist_plot)
+}
+print(histograms_quality)
+
+# Display Boxplot
+print(boxplot_sulfur)
+print(boxplot_other)
+
+# Display Probability Distribution
+print(data_prob)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+### 0-10 Target Variable
+
+# Standardize Data
+standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
+standardized_data <- cbind(quality = quality_column, standardized_data)
+
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(standardized_data$quality, p = 0.8, list = FALSE)
+train_data <- standardized_data[split_index, ]
+test_data <- standardized_data[-split_index, ]
+
+# Baseline Model
+most_common_quality <- Mode(train_data$quality)
+baseline_prediction <- rep(most_common_quality, nrow(test_data))
+predicted_labels_baseline <- as.integer(baseline_prediction)
+true_labels <- as.integer(test_data$quality)
+
+# Accuracy
+accuracy_baseline <- sum(predicted_labels_baseline == true_labels) / length(true_labels)
+cat("Accuracy for the baseline model:", accuracy_baseline, "\n")
+
+# Ordinal Regression
+
+# Backward elimination for the most parsimonious model
+# Non-correlated features
+features_reg <- c("residual.sugar", "chlorides", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol")
+all_features <- setdiff(features_reg, "quality")
+# Interaction Terms
+selected_features <- c(all_features, "residual.sugar*chlorides", "residual.sugar*total.sulfur.dioxide",
+                       "residual.sugar*density", "residual.sugar*pH", "residual.sugar*sulphates",
+                       "residual.sugar*alcohol", "chlorides*total.sulfur.dioxide", 
+                       "chlorides*density", "chlorides*pH", "chlorides*sulphates", "chlorides*alcohol",
+                       "total.sulfur.dioxide*density", "total.sulfur.dioxide*pH",
+                       "total.sulfur.dioxide*sulphates", "total.sulfur.dioxide*alcohol",
+                       "density*pH", "density*sulphates", "density*alcohol", "pH*sulphates",
+                       "pH*alcohol", "sulphates*alcohol")
+best_accuracy <- 0
+best_feature_set <- NULL
+best_num_variables <- Inf  # Initialize with a large value
+
+while (length(selected_features) >= 1) {
+  current_accuracy <- 0
+  current_num_variables <- length(selected_features)
+  worst_feature <- NULL
+  exit_loop <- FALSE  # Flag to control loop exit
+  
+  for (feature in selected_features) {
+    current_features <- setdiff(selected_features, feature)
+    
+    if (length(current_features) == 0) {
+      exit_loop <- TRUE
+      break  # Exit the inner loop when only one feature is left
+    }
+    
+    # Train the model with the current set of features
+    formula_str <- paste("factor(quality) ~ ", paste(current_features, collapse = "+"), sep = "")
+    model <- polr(as.formula(formula_str), data = train_data, Hess = TRUE)
+    
+    # Predict using the trained model on the test set
+    # (Ensure test_data is also a data frame)
+    predicted_labels <- predict(model, newdata = as.data.frame(test_data))
+    
+    # Convert predicted and true labels to integers (if not already)
+    predicted_labels <- as.integer(predicted_labels)
+    true_labels <- as.integer(test_data$quality)
+    
+    # Compute accuracy
+    accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+    
+    # Update the current accuracy, worst feature, and number of variables if needed
+    if (accuracy > current_accuracy) {
+      current_accuracy <- accuracy
+      worst_feature <- feature
+      current_num_variables <- length(current_features)
+    }
+  }
+    
+  if (exit_loop) {
+    break  # Exit the outer loop when only one feature is left
+  }
+  
+  
+  # Remove the worst feature from the selected features
+  selected_features <- setdiff(selected_features, worst_feature)
+  
+  # Update the best feature set, accuracy, and number of variables if needed
+  if (current_accuracy > best_accuracy || 
+      (current_accuracy == best_accuracy && current_num_variables < best_num_variables)) {
+    best_accuracy <- current_accuracy
+    best_feature_set <- selected_features
+    best_num_variables <- current_num_variables
+  }
+  
+  #cat("Selected features:", selected_features, "\n")
+  #cat("Current accuracy:", current_accuracy, "\n")
+  #cat("Current number of variables:", current_num_variables, "\n\n")
+}
+cat("Best feature set:", best_feature_set, "\n")
+cat("Best accuracy:", best_accuracy, "\n")
+cat("Best number of variables:", best_num_variables, "\n")
+
+# Multiple Regression
+initial_model <- lm(quality ~ residual.sugar + chlorides + total.sulfur.dioxide + density+ pH +
+                      sulphates + alcohol + residual.sugar*chlorides +
+                      residual.sugar*total.sulfur.dioxide +
+                      residual.sugar*density + residual.sugar*pH + residual.sugar*sulphates +
+                      residual.sugar*alcohol + chlorides*total.sulfur.dioxide +
+                      chlorides*density + chlorides*pH + chlorides*sulphates + chlorides*alcohol +
+                      total.sulfur.dioxide*density + total.sulfur.dioxide*pH +
+                      total.sulfur.dioxide*sulphates + total.sulfur.dioxide*alcohol +
+                      density*pH + density*sulphates + density*alcohol + pH*sulphates +
+                      pH*alcohol + sulphates*alcohol, data = train_data)
+
+# Perform backward elimination using stepwise regression
+final_model <- step(initial_model, direction = "backward")
+
+# Display the final model
+summary(final_model)
+
+X_test <- as.data.frame(test_data[, !grepl("quality", names(test_data))])
+predicted_labels <- predict(final_model, newdata = X_test)
+predicted_labels <- as.integer(predicted_labels)
+
+# Convert predicted and true labels to integers (if not already)
+predicted_labels <- as.integer(predicted_labels)
+true_labels <- as.integer(test_data$quality)
+
+# Compute accuracy
+accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+print(accuracy)
+```
+
+```{r, warning=FALSE, message=FALSE}
+### 1-3 Target Variable
+
+# Standardize Data
+standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
+standardized_data <- cbind(quality = quality_column, standardized_data)
+standardized_data$ordinal_quality <- cut(standardized_data$quality, 
+                     breaks = c(-Inf, 4.5, 5.5, Inf), 
+                     labels = c(1, 2, 3),
+                     include.lowest = TRUE)
+standardized_data$ordinal_quality <- as.numeric(standardized_data$ordinal_quality)
+standardized_data <- select(standardized_data, -quality)
+
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(standardized_data$ordinal_quality, p = 0.8, list = FALSE)
+train_data <- standardized_data[split_index, ]
+test_data <- standardized_data[-split_index, ]
+
+# Baseline Model
+most_common_quality <- Mode(train_data$ordinal_quality)
+baseline_prediction <- rep(most_common_quality, nrow(test_data))
+predicted_labels_baseline <- as.integer(baseline_prediction)
+true_labels <- as.integer(test_data$ordinal_quality)
+
+# Accuracy
+accuracy_baseline <- sum(predicted_labels_baseline == true_labels) / length(true_labels)
+cat("Accuracy for the baseline model:", accuracy_baseline, "\n")
+
+# Ordinal Regression
+# Backward elimination for the most parsimonious model
+# Non-correlated features
+features_reg <- c("residual.sugar", "chlorides", 
+              "total.sulfur.dioxide", "density", "pH", "sulphates", 
+              "alcohol")
+all_features <- setdiff(features_reg, "ordinal_quality")
+# Interaction Terms
+selected_features <- c(all_features, "residual.sugar*chlorides", "residual.sugar*total.sulfur.dioxide",
+                       "residual.sugar*density", "residual.sugar*pH", "residual.sugar*sulphates",
+                       "residual.sugar*alcohol", "chlorides*total.sulfur.dioxide", 
+                       "chlorides*density", "chlorides*pH", "chlorides*sulphates", "chlorides*alcohol",
+                       "total.sulfur.dioxide*density", "total.sulfur.dioxide*pH",
+                       "total.sulfur.dioxide*sulphates", "total.sulfur.dioxide*alcohol",
+                       "density*pH", "density*sulphates", "density*alcohol", "pH*sulphates",
+                       "pH*alcohol", "sulphates*alcohol")
+best_accuracy <- 0
+best_feature_set <- NULL
+best_num_variables <- Inf  # Initialize with a large value
+
+while (length(selected_features) >= 1) {
+  current_accuracy <- 0
+  current_num_variables <- length(selected_features)
+  worst_feature <- NULL
+  exit_loop <- FALSE  # Flag to control loop exit
+  
+  for (feature in selected_features) {
+    current_features <- setdiff(selected_features, feature)
+    
+    if (length(current_features) == 0) {
+      exit_loop <- TRUE
+      break  # Exit the inner loop when only one feature is left
+    }
+    
+    # Train the model with the current set of features
+    formula_str <- paste("factor(ordinal_quality) ~ ", paste(current_features, collapse = "+"), sep = "")
+    model <- polr(as.formula(formula_str), data = train_data, Hess = TRUE)
+    
+    # Predict using the trained model on the test set
+    # (Ensure test_data is also a data frame)
+    predicted_labels <- predict(model, newdata = as.data.frame(test_data))
+    
+    # Convert predicted and true labels to integers (if not already)
+    predicted_labels <- as.integer(predicted_labels)
+    true_labels <- as.integer(test_data$ordinal_quality)
+    
+    # Compute accuracy
+    accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+    
+    # Update the current accuracy, worst feature, and number of variables if needed
+    if (accuracy > current_accuracy) {
+      current_accuracy <- accuracy
+      worst_feature <- feature
+      current_num_variables <- length(current_features)
+    }
+  }
+    
+  if (exit_loop) {
+    break  # Exit the outer loop when only one feature is left
+  }
+  
+  
+  # Remove the worst feature from the selected features
+  selected_features <- setdiff(selected_features, worst_feature)
+  
+  # Update the best feature set, accuracy, and number of variables if needed
+  if (current_accuracy > best_accuracy || 
+      (current_accuracy == best_accuracy && current_num_variables < best_num_variables)) {
+    best_accuracy <- current_accuracy
+    best_feature_set <- selected_features
+    best_num_variables <- current_num_variables
+  }
+  
+  #cat("Selected features:", selected_features, "\n")
+  #cat("Current accuracy:", current_accuracy, "\n")
+  #cat("Current number of variables:", current_num_variables, "\n\n")
+}
+cat("Best feature set:", best_feature_set, "\n")
+cat("Best accuracy:", best_accuracy, "\n")
+cat("Best number of variables:", best_num_variables, "\n")
+
+# Multiple Regression
+initial_model <- lm(ordinal_quality ~ residual.sugar + chlorides + total.sulfur.dioxide + 
+                      density+ pH + sulphates + alcohol + residual.sugar*chlorides +
+                      residual.sugar*total.sulfur.dioxide +
+                      residual.sugar*density + residual.sugar*pH + residual.sugar*sulphates +
+                      residual.sugar*alcohol + chlorides*total.sulfur.dioxide +
+                      chlorides*density + chlorides*pH + chlorides*sulphates + chlorides*alcohol +
+                      total.sulfur.dioxide*density + total.sulfur.dioxide*pH +
+                      total.sulfur.dioxide*sulphates + total.sulfur.dioxide*alcohol +
+                      density*pH + density*sulphates + density*alcohol + pH*sulphates +
+                      pH*alcohol + sulphates*alcohol, data = train_data)
+
+# Perform backward elimination using stepwise regression
+final_model <- step(initial_model, direction = "backward")
+
+# Display the final model
+summary(final_model)
+
+X_test <- as.data.frame(test_data[, !grepl("ordinal_quality", names(test_data))])
+predicted_labels <- predict(final_model, newdata = X_test)
+predicted_labels <- as.integer(predicted_labels)
+
+# Convert predicted and true labels to integers (if not already)
+predicted_labels <- as.integer(predicted_labels)
+true_labels <- as.integer(test_data$ordinal_quality)
+
+# Compute accuracy
+accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+print(accuracy)
+```
