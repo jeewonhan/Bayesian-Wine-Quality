@@ -8,7 +8,6 @@ date: "2023-11-28"
 library("latex2exp")
 library("ggplot2")
 library("MASS")
-#library("MCMCpack")
 library("coda")
 library("dplyr")
 library("tidyr")
@@ -17,35 +16,552 @@ library("reshape2")
 library("DescTools")
 ```
 
-
 ```{r, warning=FALSE, message=FALSE}
-# Data
+rm(list=ls())
+#Preprocessing to prepare the data for Bayesian regression on Quality
+#Read data
 data <- read.csv("winequality-red.csv", sep=';')
 quality_column <- data$quality
 
 # Standardize all columns except the "quality" column
 standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
-
-# Add the "quality" column back to the standardized dataframe
 standardized_data <- cbind(quality = quality_column, standardized_data)
 
+set.seed(123)  # Set seed for reproducibility
+
+# Interaction Terms
+interaction_terms <- c("residual.sugar*chlorides", "residual.sugar*total.sulfur.dioxide",
+                       "residual.sugar*density", "residual.sugar*pH", "residual.sugar*sulphates",
+                       "residual.sugar*alcohol", "chlorides*total.sulfur.dioxide", 
+                       "chlorides*density", "chlorides*pH", "chlorides*sulphates", "chlorides*alcohol",
+                       "total.sulfur.dioxide*density", "total.sulfur.dioxide*pH",
+                       "total.sulfur.dioxide*sulphates", "total.sulfur.dioxide*alcohol",
+                       "density*pH", "density*sulphates", "density*alcohol", "pH*sulphates",
+                       "pH*alcohol", "sulphates*alcohol")
+
+# Iterate through the interaction terms and create new columns for each interaction term
+for (term in interaction_terms) {
+  terms <- strsplit(term, "\\*")[[1]]
+  col_name <- paste(terms, collapse = "_times_")
+  # Create the new column
+  standardized_data <- mutate(standardized_data, !!col_name := !!sym(terms[1]) * !!sym(terms[2]))
+}
+
+# Non-correlated features
+features_reg <- c("residual.sugar", "chlorides", 
+                "total.sulfur.dioxide", "density", "pH", "sulphates", 
+                "alcohol", 
+                "residual.sugar_times_chlorides", 
+                "residual.sugar_times_total.sulfur.dioxide",
+                "residual.sugar_times_density", 
+                "residual.sugar_times_pH", 
+                "residual.sugar_times_sulphates",
+                "residual.sugar_times_alcohol", 
+                "chlorides_times_total.sulfur.dioxide", 
+                "chlorides_times_density", 
+                "chlorides_times_pH",
+                "chlorides_times_sulphates", 
+                "chlorides_times_alcohol",
+                "total.sulfur.dioxide_times_density", 
+                "total.sulfur.dioxide_times_pH",
+                "total.sulfur.dioxide_times_sulphates", 
+                "total.sulfur.dioxide_times_alcohol",
+                "density_times_pH", 
+                "density_times_sulphates", 
+                "density_times_alcohol", 
+                "pH_times_sulphates",
+                "pH_times_alcohol", 
+                "sulphates_times_alcohol", 
+                "quality")
+
+standardized_data <- standardized_data[, (names(standardized_data) %in% features_reg)]
+standardized_data_q <- standardized_data
+
+
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+#Preprocessing to prepare the data for Bayesian regression on Ordinal_Quality
+
+standardized_data_oq <- standardized_data
+
 # Add ordinal_quality - don't do when doing quality
-standardized_data$ordinal_quality <- cut(standardized_data$quality, 
+standardized_data_oq$ordinal_quality <- cut(standardized_data_oq$quality, 
                      breaks = c(-Inf, 4.5, 5.5, Inf), 
                      labels = c(1, 2, 3),
                      include.lowest = TRUE)
 
 # Convert the new_column to numeric type
-standardized_data$ordinal_quality <- as.numeric(standardized_data$ordinal_quality)
+standardized_data_oq$ordinal_quality <- as.numeric(standardized_data_oq$ordinal_quality)
 
 # DROP QUALITY COLUMN - when doing ordinal quality
-standardized_data <- standardized_data[, !(names(standardized_data) %in% c("quality"))]
+standardized_data_oq <- standardized_data_oq[, !(names(standardized_data_oq) %in% c("quality"))]
+
+
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+#MCMC Model Selection for Quality, using Bayesian Linear Regression
+
+#Function to carry out Bayesian linear regression (used in our Gibbs sampler)
+lm.gprior<-function(y,X,g=dim(X)[1],nu0=1,s20=try(summary(lm(y~-1+X))$sigma^2,silent=TRUE),S=1000)
+{
+
+  n<-dim(X)[1] ; p<-dim(X)[2]
+  Hg<- (g/(g+1)) * X%*%solve(t(X)%*%X)%*%t(X)
+  SSRg<- t(y)%*%( diag(1,nrow=n)  - Hg ) %*%y
+
+  s2<-1/rgamma(S, (nu0+n)/2, (nu0*s20+SSRg)/2 )
+
+  Vb<- g*solve(t(X)%*%X)/(g+1)
+  Eb<- Vb%*%t(X)%*%y
+
+  E<-matrix(rnorm(S*p,0,sqrt(s2)),S,p)
+  beta<-t(  t(E%*%chol(Vb)) +c(Eb))
+
+  list(beta=beta,s2=s2)                                
+}
+
+#Function to compute the marginal probability
+lpy.X<-function(y,X,
+   g=length(y),nu0=1,s20=try(summary(lm(y~-1+X))$sigma^2,silent=TRUE)) 
+{
+  n<-dim(X)[1] ; p<-dim(X)[2] 
+  if(p==0) { s20<-mean(y^2) }
+  H0<-0 ; if(p>0) { H0<- (g/(g+1)) * X%*%solve(t(X)%*%X)%*%t(X) }
+  SS0<- t(y)%*%( diag(1,nrow=n)  - H0 ) %*%y
+
+  -.5*n*log(2*pi) +lgamma(.5*(nu0+n)) - lgamma(.5*nu0)  - .5*p*log(1+g) +
+   .5*nu0*log(.5*nu0*s20) -.5*(nu0+n)*log(.5*(nu0*s20+SS0))
+}
+
+#Setup for Gibbs Sampler
+predictors <- names(standardized_data_q)[names(standardized_data_q) != "quality"]
+X <- model.matrix(quality ~ ., data = standardized_data_q[, c("quality", predictors)])
+y <- standardized_data_q$quality
+n<-dim(X)[1]
+p<-dim(X)[2]
+S<-10000
+BETA<-Z<-matrix(NA,S,p)
+z<-rep(1,dim(X)[2] )
+lpy.c<-lpy.X(y,X[,z==1,drop=FALSE])
+
+#Gibbs Sampler
+for(s in 1:S)
+{
+  for(j in sample(1:p))
+  {
+    zp<-z ; zp[j]<-1-zp[j]
+    lpy.p<-lpy.X(y,X[,zp==1,drop=FALSE])
+    r<- (lpy.p - lpy.c)*(-1)^(zp[j]==0)
+    z[j]<-rbinom(1,1,1/(1+exp(-r)))
+    if(z[j]==zp[j]) {lpy.c<-lpy.p}
+  }
+
+  beta<-z
+  if(sum(z)>0){beta[z==1]<-lm.gprior(y,X[,z==1,drop=FALSE],S=1)$beta }
+  Z[s,]<-z
+  BETA[s,]<-beta
+} 
+
+colnames(BETA) <- colnames(X)
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+#Save our Beta and Z Gibbs Sample results
+BETA_q <- BETA
+Z_q <- Z
+
+write.csv(BETA_q, file = "BETA_Quality.csv", row.names = FALSE)
+write.csv(Z_q, file = "Z_Quality.csv", row.names = FALSE)
+
+
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+z <- read.csv("Z_Quality.csv", sep=',')
+#Calculate posterior probabilities for each of the 29 regressors
+Zcp<- apply(z, 2, cumsum) / seq_len(nrow(z))
+last_row <- Zcp[nrow(Zcp),, drop=FALSE]
+#set each z = 1 if p(z|y,x) > 0.5 and z = 0 if p(z|y,x) <= 0.5
+last_row[last_row > 0.5] <- 1
+last_row[last_row <= 0.5] <- 0
+colnames(last_row) <- colnames(X)
+#get the list of variables with z = 1
+variables_to_use_q_model <- colnames(last_row)[which(last_row == 1)]
+variables_to_use_q_model <- variables_to_use_q_model[variables_to_use_q_model != "(Intercept)"]
+#select the columns to be used for the quality model
+q_model <- standardized_data_q[, variables_to_use_q_model, drop = FALSE]
+#add quality back into the model
+q_model <- cbind(quality = quality_column, q_model)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+#MCMC Model Selection For Ordinal Quality, using Bayesian Linear Regression
+
+#Get all predictors, X and Y
+predictors <- names(standardized_data_oq)[names(standardized_data_oq) != "ordinal_quality"]
+X <- model.matrix(ordinal_quality ~ ., data = standardized_data_oq[, c("ordinal_quality", predictors)])
+y <- standardized_data_oq$ordinal_quality
+
+#Set up for Gibbs Sampler
+n<-dim(X)[1]
+p<-dim(X)[2]
+S<-10000
+BETA<-Z<-matrix(NA,S,p)
+z<-rep(1,dim(X)[2] )
+lpy.c<-lpy.X(y,X[,z==1,drop=FALSE])
+
+for(s in 1:S)
+{
+  for(j in sample(1:p))
+  {
+    zp<-z ; zp[j]<-1-zp[j]
+    lpy.p<-lpy.X(y,X[,zp==1,drop=FALSE])
+    r<- (lpy.p - lpy.c)*(-1)^(zp[j]==0)
+    z[j]<-rbinom(1,1,1/(1+exp(-r)))
+    if(z[j]==zp[j]) {lpy.c<-lpy.p}
+  }
+
+  beta<-z
+  if(sum(z)>0){beta[z==1]<-lm.gprior(y,X[,z==1,drop=FALSE],S=1)$beta }
+  Z[s,]<-z
+  BETA[s,]<-beta
+} 
+colnames(BETA) <- colnames(X)
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+#Save our Beta and Z Gibbs Sample results
+BETA_oq <- BETA
+Z_oq <- Z
+
+write.csv(BETA_oq, file = "BETA_Ordinal_Quality.csv", row.names = FALSE)
+write.csv(Z_oq, file = "Z_Ordinal_Quality.csv", row.names = FALSE)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+z <- read.csv("Z_Ordinal_Quality.csv", sep=',')
+#Calculate posterior probabilities for each of the 29 regressors
+Zcp<- apply(z, 2, cumsum) / seq_len(nrow(z))
+last_row <- Zcp[nrow(Zcp),, drop=FALSE]
+#set each z = 1 if p(z|y,x) > 0.5 and z = 0 if p(z|y,x) <= 0.5
+last_row[last_row > 0.5] <- 1
+last_row[last_row <= 0.5] <- 0
+colnames(last_row) <- colnames(X)
+#get the list of variables with z = 1
+variables_to_use_oq_model <- colnames(last_row)[which(last_row == 1)]
+variables_to_use_oq_model <- variables_to_use_oq_model[variables_to_use_oq_model != "(Intercept)"]
+#select the columns to be used for the quality model
+oq_model <- standardized_data_oq[, variables_to_use_oq_model, drop = FALSE]
+#add ordinal quality back into the model
+ordinal_quality_column <- standardized_data_oq$ordinal_quality
+oq_model <- cbind(ordinal_quality = ordinal_quality_column, oq_model)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+### Linear regression with quality as the target variable
+predictors <- names(q_model)[names(q_model) != "quality"]
 
 # Train/Test Split
 set.seed(123)  # Set seed for reproducibility
-split_index <- createDataPartition(standardized_data$ordinal_quality, p = 0.8, list = FALSE)
-train_data <- standardized_data[split_index, ]
-test_data <- standardized_data[-split_index, ]
+split_index <- createDataPartition(q_model$quality, p = 0.8, list = FALSE)
+train_data <- standardized_data_q[split_index, ]
+test_data <- standardized_data_q[-split_index, ]
+
+yquality<-match(train_data$quality,sort(unique(train_data$quality)))
+
+y_train<-train_data$quality
+X_train<- model.matrix(quality ~ ., data = train_data[, c("quality", predictors)])
+keep<- (1:length(y_train))[ !is.na( apply( cbind(X_train,y_train),1,mean) ) ]
+X_train<-X_train[keep,] ; y_train<-y_train[keep]
+
+n<-dim(X_train)[1]
+p<-dim(X_train)[2]
+
+X_test<- model.matrix(quality ~ ., data = test_data[, c("quality", predictors)])
+y_test <-test_data$quality
+keep<- (1:length(y_test))[ !is.na( apply( cbind(X_test,y_test),1,mean) ) ]
+X_test<-X_test[keep,] ; y_test<-y_test[keep]
+
+#set default priors for g and nu0
+g = n
+nu0 = 1
+
+#Compute sigma2_hat_ols to set as our sigma20
+# Fit a linear regression model
+lm_model <- lm(quality ~ ., data = q_model)
+residuals <- residuals(lm_model)
+n_ols <- length(residuals)
+p_ols <- length(coef(lm_model))  # Number of coefficients, including intercept
+s2_hat_ols <- sum(residuals^2) / (n_ols - p_ols)
+s20 <- s2_hat_ols
+
+#Priors: g = n, nu0 = 1, sigma20 = sigma2_hat_ols
+
+
+S <- 10000
+
+Hg <- (g / (g + 1)) * X_train %*% solve(t(X_train) %*% X_train) %*% t(X_train)
+SSRg <- t(y_train) %*% (diag(1, nrow = n) - Hg) %*% y_train
+
+s2 <- 1 / rgamma(S, (nu0 + n) / 2, (nu0 * s20 + SSRg) / 2)
+
+Vb <- g * solve(t(X_train) %*% X_train) / (g + 1)
+Eb <- Vb %*% t(X_train) %*% y_train
+
+E <- matrix(rnorm(S * p, 0, sqrt(s2)), S, p)
+beta <- t(t(E %*% chol(Vb)) + c(Eb))
+
+beta_bayes <- as.matrix(colMeans(beta))
+
+y_bayes <- X_test %*% beta_bayes
+y_bayes <- y_bayes
+
+y_test <- y_test
+
+bayes_df = data.frame(
+  observed = y_test,
+  predicted = y_bayes
+)
+ggplot(bayes_df, aes(x = observed, y = predicted)) +
+  geom_point()
+
+predicted_labels <- as.integer(y_bayes)
+
+# Convert predicted and true labels to integers (if not already)
+true_labels <- as.integer(y_test)
+
+
+# Compute accuracy
+accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+print(accuracy)
+
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+### Ordered probit regression with quality as the target variable
+
+#Shift quality down by two for the ordered probit gression
+q_model$quality <- q_model$quality - 2
+
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(q_model$quality, p = 0.8, list = FALSE)
+train_data <- q_model[split_index, ]
+test_data <- q_model[-split_index, ]
+
+yquality<-match(train_data$quality,sort(unique(train_data$quality)))
+
+# Regress on all 
+tmp<-lm(yquality ~ ., data=train_data)
+
+#####
+X<-as.matrix(train_data[, !grepl("quality", names(train_data))]) # drop Y column
+y<-train_data$quality
+keep<- (1:length(y))[ !is.na( apply( cbind(X,y),1,mean) ) ]
+X<-X[keep,] ; y<-y[keep]
+ranks<-match(y,sort(unique(y))) ; 
+uranks<-sort(unique(ranks))
+#ranks<-10 ; 
+#uranks<-10 ;
+n<-dim(X)[1] ; p<-dim(X)[2]
+iXX<-solve(t(X)%*%X)  ; V<-iXX*(n/(n+1)) ; cholV<-chol(V)
+
+#### Ordinal probit regression
+
+## setup
+set.seed(1)
+beta<-rep(0,p) 
+z<-qnorm(rank(y,ties.method="random")/(n+1))
+g<-rep(NA,length(uranks)-1)
+K<-length(uranks)
+BETA<-matrix(NA,1000,p) ; Z<-matrix(NA,1000,n) ; ac<-0
+mu<-rep(0,K-1) ; sigma<-rep(1000,K-1) 
+
+## MCMC
+S<-25000
+for(s in 1:S) 
+{
+
+  #update g 
+  for(k in 1:(K-1)) 
+  {
+  a<-max(z[y==k])
+  b<-min(z[y==k+1])
+  u<-runif(1, pnorm( (a-mu[k])/sigma[k] ),
+              pnorm( (b-mu[k])/sigma[k] ) )
+  g[k]<- mu[k] + sigma[k]*qnorm(u)
+  }
+
+  #update beta
+  E<- V%*%( t(X)%*%z )
+  beta<- cholV%*%rnorm(p) + E
+
+  #update z
+  ez<-X%*%beta
+  a<-c(-Inf,g)[ match( y-1, 0:K) ]
+  b<-c(g,Inf)[y]  
+  u<-runif(n, pnorm(a-ez),pnorm(b-ez) )
+  z<- ez + qnorm(u)
+
+
+  #help mixing
+  c<-rnorm(1,0,n^(-1/3))  
+  zp<-z+c ; gp<-g+c
+  lhr<-  sum(dnorm(zp,ez,1,log=T) - dnorm(z,ez,1,log=T) ) + 
+         sum(dnorm(gp,mu,sigma,log=T) - dnorm(g,mu,sigma,log=T) )
+  if(log(runif(1))<lhr) { z<-zp ; g<-gp ; ac<-ac+1 }
+
+  if(s%%(S/1000)==0) 
+  { 
+    #cat(s/S,ac/s,"\n")
+    BETA[s/(S/1000),]<-  beta
+    Z[s/(S/1000),]<- z
+  }
+}
+
+# Assuming BETA and Z matrices are available from the MCMC sampling
+
+# Extract mean values from MCMC samples
+mean_beta <- colMeans(BETA, na.rm = TRUE)
+
+# Extract relevant columns from the test set
+X_test <- as.matrix(test_data[, !grepl("quality", names(test_data))])
+
+# Make predictions using the mean of MCMC samples
+final_g <- X_test %*% mean_beta
+
+print(g)
+# Convert predictions to ordinal labels
+predicted_labels <- cut(final_g, 
+                        breaks = c(-Inf, g, Inf),
+                        labels = c(3, 4, 5, 6, 7, 8), 
+                        include.lowest = TRUE)
+
+# Evaluate the predictions (assuming you have true ordinal_quality values for the test set)
+confusion_matrix <- table(predicted_labels, test_data$quality+2)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+# Print the confusion matrix and accuracy
+print("Confusion Matrix:")
+print(confusion_matrix)
+print(paste("Accuracy:", round(accuracy, 4)))
+```
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+### Linear regression with ordinal_quality as the target variable
+
+
+predictors <- names(oq_model)[names(oq_model) != "ordinal_quality"]
+
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(oq_model$ordinal_quality, p = 0.8, list = FALSE)
+train_data <- oq_model[split_index, ]
+test_data <- oq_model[-split_index, ]
+
+yquality<-match(train_data$quality,sort(unique(train_data$ordinal_quality)))
+
+y_train<-train_data$ordinal_quality
+X_train<- model.matrix(ordinal_quality ~ ., data = train_data[, c("ordinal_quality", predictors)])
+keep<- (1:length(y_train))[ !is.na( apply( cbind(X_train,y_train),1,mean) ) ]
+X_train<-X_train[keep,] ; y_train<-y_train[keep]
+
+n<-dim(X_train)[1]
+p<-dim(X_train)[2]
+
+X_test<- model.matrix(ordinal_quality ~ ., data = test_data[, c("ordinal_quality", predictors)])
+y_test <-test_data$ordinal_quality
+keep<- (1:length(y_test))[ !is.na( apply( cbind(X_test,y_test),1,mean) ) ]
+X_test<-X_test[keep,] ; y_test<-y_test[keep]
+
+#set default priors for g and nu0
+g = n
+nu0 = 1
+
+#Compute sigma2_hat_ols to set as our sigma20
+# Fit a linear regression model
+lm_model <- lm(ordinal_quality ~ ., data = oq_model)
+residuals <- residuals(lm_model)
+n_ols <- length(residuals)
+p_ols <- length(coef(lm_model))  # Number of coefficients, including intercept
+s2_hat_ols <- sum(residuals^2) / (n_ols - p_ols)
+s20 <- s2_hat_ols
+
+#Priors: g = n, nu0 = 1, sigma20 = sigma2_hat_ols
+
+
+S <- 25000
+
+Hg <- (g / (g + 1)) * X_train %*% solve(t(X_train) %*% X_train) %*% t(X_train)
+SSRg <- t(y_train) %*% (diag(1, nrow = n) - Hg) %*% y_train
+
+s2 <- 1 / rgamma(S, (nu0 + n) / 2, (nu0 * s20 + SSRg) / 2)
+
+Vb <- g * solve(t(X_train) %*% X_train) / (g + 1)
+Eb <- Vb %*% t(X_train) %*% y_train
+
+E <- matrix(rnorm(S * p, 0, sqrt(s2)), S, p)
+beta <- t(t(E %*% chol(Vb)) + c(Eb))
+
+beta_bayes <- as.matrix(colMeans(beta))
+
+y_bayes <- X_test %*% beta_bayes
+y_bayes <- y_bayes
+
+y_test <- y_test
+
+bayes_df = data.frame(
+  observed = y_test,
+  predicted = y_bayes
+)
+ggplot(bayes_df, aes(x = observed, y = predicted)) +
+  geom_point()
+
+predicted_labels <- as.integer(y_bayes)
+
+# Convert predicted and true labels to integers (if not already)
+true_labels <- as.integer(y_test)
+
+# Compute accuracy
+accuracy <- sum(predicted_labels == true_labels) / length(true_labels)
+print(accuracy)
+
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+### ordered probit regression with ordinal_quality as the target variable
+
+
+# Train/Test Split
+set.seed(123)  # Set seed for reproducibility
+split_index <- createDataPartition(oq_model$ordinal_quality, p = 0.8, list = FALSE)
+train_data <- oq_model[split_index, ]
+test_data <- oq_model[-split_index, ]
 
 yordquality<-match(train_data$ordinal_quality,sort(unique(train_data$ordinal_quality)))
 
@@ -129,12 +645,6 @@ predicted_labels <- cut(final_g,
                         labels = c(1, 2, 3), 
                         include.lowest = TRUE)
 
-# Convert predictions to ordinal labels
-# predicted_labels <- cut(final_predictions, 
-#                         breaks = c(-Inf, 1.5, 2.5, Inf), 
-#                         labels = c(1, 2, 3), 
-#                         include.lowest = TRUE)
-
 # Evaluate the predictions (assuming you have true ordinal_quality values for the test set)
 confusion_matrix <- table(predicted_labels, test_data$ordinal_quality)
 accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
@@ -145,118 +655,6 @@ print(confusion_matrix)
 print(paste("Accuracy:", round(accuracy, 4)))
 ```
 
-```{r, warning=FALSE, message=FALSE}
-### QUALITY, NOT ORDINAL_QUALITY
-
-# Data
-data <- read.csv("winequality-red.csv", sep=';')
-quality_column <- data$quality-2
-
-# Standardize all columns except the "quality" column
-standardized_data <- as.data.frame(scale(data[, -which(names(data) == "quality")]))
-
-# Add the "quality" column back to the standardized dataframe
-standardized_data <- cbind(quality = quality_column, standardized_data)
-
-# Train/Test Split
-set.seed(123)  # Set seed for reproducibility
-split_index <- createDataPartition(standardized_data$quality, p = 0.8, list = FALSE)
-train_data <- standardized_data[split_index, ]
-test_data <- standardized_data[-split_index, ]
-
-yquality<-match(train_data$quality,sort(unique(train_data$quality)))
-
-# Regress on all 
-tmp<-lm(yquality ~ ., data=train_data)
-
-#####
-X<-as.matrix(train_data[, !grepl("quality", names(train_data))]) # drop Y column
-y<-train_data$quality
-keep<- (1:length(y))[ !is.na( apply( cbind(X,y),1,mean) ) ]
-X<-X[keep,] ; y<-y[keep]
-ranks<-match(y,sort(unique(y))) ; 
-uranks<-sort(unique(ranks))
-#ranks<-10 ; 
-#uranks<-10 ;
-n<-dim(X)[1] ; p<-dim(X)[2]
-iXX<-solve(t(X)%*%X)  ; V<-iXX*(n/(n+1)) ; cholV<-chol(V)
-
-#### Ordinal probit regression
-
-## setup
-set.seed(1)
-beta<-rep(0,p) 
-z<-qnorm(rank(y,ties.method="random")/(n+1))
-g<-rep(NA,length(uranks)-1)
-K<-length(uranks)
-BETA<-matrix(NA,1000,p) ; Z<-matrix(NA,1000,n) ; ac<-0
-mu<-rep(0,K-1) ; sigma<-rep(1000,K-1) 
-
-## MCMC
-S<-25000
-for(s in 1:S) 
-{
-
-  #update g 
-  for(k in 1:(K-1)) 
-  {
-  a<-max(z[y==k])
-  b<-min(z[y==k+1])
-  u<-runif(1, pnorm( (a-mu[k])/sigma[k] ),
-              pnorm( (b-mu[k])/sigma[k] ) )
-  g[k]<- mu[k] + sigma[k]*qnorm(u)
-  }
-
-  #update beta
-  E<- V%*%( t(X)%*%z )
-  beta<- cholV%*%rnorm(p) + E
-
-  #update z
-  ez<-X%*%beta
-  a<-c(-Inf,g)[ match( y-1, 0:K) ]
-  b<-c(g,Inf)[y]  
-  u<-runif(n, pnorm(a-ez),pnorm(b-ez) )
-  z<- ez + qnorm(u)
 
 
-  #help mixing
-  c<-rnorm(1,0,n^(-1/3))  
-  zp<-z+c ; gp<-g+c
-  lhr<-  sum(dnorm(zp,ez,1,log=T) - dnorm(z,ez,1,log=T) ) + 
-         sum(dnorm(gp,mu,sigma,log=T) - dnorm(g,mu,sigma,log=T) )
-  if(log(runif(1))<lhr) { z<-zp ; g<-gp ; ac<-ac+1 }
 
-  if(s%%(S/1000)==0) 
-  { 
-    #cat(s/S,ac/s,"\n")
-    BETA[s/(S/1000),]<-  beta
-    Z[s/(S/1000),]<- z
-  }
-}
-
-# Assuming BETA and Z matrices are available from the MCMC sampling
-
-# Extract mean values from MCMC samples
-mean_beta <- colMeans(BETA, na.rm = TRUE)
-
-# Extract relevant columns from the test set
-X_test <- as.matrix(test_data[, !grepl("quality", names(test_data))])
-
-# Make predictions using the mean of MCMC samples
-final_g <- X_test %*% mean_beta
-
-# Convert predictions to ordinal labels
-predicted_labels <- cut(final_g, 
-                        breaks = c(-Inf, g, Inf),
-                        labels = c(3, 4, 5, 6, 7, 8), 
-                        include.lowest = TRUE)
-
-# Evaluate the predictions (assuming you have true ordinal_quality values for the test set)
-confusion_matrix <- table(predicted_labels, test_data$quality+2)
-accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
-
-# Print the confusion matrix and accuracy
-print("Confusion Matrix:")
-print(confusion_matrix)
-print(paste("Accuracy:", round(accuracy, 4)))
-```
