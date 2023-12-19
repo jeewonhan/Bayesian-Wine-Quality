@@ -379,7 +379,6 @@ summary(final_model)
 
 X_test <- as.data.frame(test_data[, !grepl("ordinal_quality", names(test_data))])
 predicted_labels <- predict(final_model, newdata = X_test)
-predicted_labels <- as.integer(predicted_labels)
 
 # Convert predicted and true labels to integers (if not already)
 predicted_labels <- as.integer(predicted_labels)
